@@ -1,0 +1,32 @@
+# Netlify redirects file for TryneX Lifestyle
+
+# Redirect all 404s to the homepage for SPA routing
+/* /index.html 200
+
+# Admin routes
+/admin /admin.html 200
+/dashboard /admin.html 200
+
+# Tracking routes
+/track /track-order.html 200
+/track-order /track-order.html 200
+/order-status /track-order.html 200
+
+# Policy routes
+/return-policy /return-policy.html 200
+/returns /return-policy.html 200
+/refund-policy /refund-policy.html 200
+/refunds /refund-policy.html 200
+/terms /rules.html 200
+/terms-and-conditions /rules.html 200
+/rules /rules.html 200
+
+# Legacy redirects
+/home /index.html 301
+/shop /index.html 301
+/products /index.html#products 301
+/about /index.html#about 301
+/contact /index.html#contact 301
+
+# Force HTTPS (optional)
+http://trynex-lifestyle.netlify.app/* https://trynex-lifestyle.netlify.app/:splat 301!
