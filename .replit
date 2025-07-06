@@ -1,0 +1,11 @@
+[workflows]
+runButton = "Start Website"
+
+[[workflows.workflow]]
+name = "Start Website"
+author = 44683581
+mode = "sequential"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "python -m http.server 5000 --bind 0.0.0.0"
