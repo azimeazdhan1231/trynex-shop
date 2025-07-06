@@ -195,42 +195,87 @@ async function loadAllData() {
     }
 }
 
-// Products Management
+// Load products from multiple sources with retry logic
 async function loadProducts() {
     try {
-        // Always start with sample products to ensure we have data
-        let products = getSample48Products();
+        let products = [];
 
+        // Try database first
         if (isConnected && supabase) {
             try {
                 const { data, error } = await supabase
                     .from('products')
-                    .select('*')
-                    .eq('is_active', true)
+                    .select(`
+                        *,
+                        categories (
+                            name,
+                            slug
+                        )
+                    `)
                     .order('created_at', { ascending: false });
 
-                if (!error && data && data.length > 0) {
-                    // Merge database products with sample products
-                    const dbProducts = data;
-                    const existingIds = dbProducts.map(p => p.id);
-                    const sampleToAdd = products.filter(p => !existingIds.includes(p.id));
-                    products = [...dbProducts, ...sampleToAdd];
+                if (!error && data) {
+                    // Transform data to match expected format
+                    products = data.map(product => ({
+                        id: product.id,
+                        name: product.name,
+                        price: product.price,
+                        description: product.description,
+                        image_url: product.image_url,
+                        category: product.categories ? product.categories.name : 'General',
+                        badge: product.badge,
+                        featured: product.feature,
+                        is_featured: product.feature,
+                        stock_quantity: product.stock_quantity,
+                        is_active: true,
+                        created_at: product.created_at
+                    }));
+                    console.log(`✅ Loaded ${products.length} products from database`);
                 }
             } catch (dbError) {
-                console.log('Database connection failed, using sample data');
+                console.log('Database connection failed, using fallbacks');
             }
-        } else {
-            products = JSON.parse(localStorage.getItem('products') || '[]');
+        }
+
+        // Try localStorage if database failed
+        if (products.length === 0) {
+            const cachedProducts = localStorage.getItem('admin-products') || 
+                                 localStorage.getItem('products') ||
+                                 localStorage.getItem('website-products');
+            if (cachedProducts) {
+                try {
+                    products = JSON.parse(cachedProducts);
+                    console.log(`✅ Loaded ${products.length} products from cache`);
+                } catch (parseError) {
+                    console.log('Cache parse failed');
+                }
+            }
+        }
+
+        // Use sample products if nothing else works
+        if (products.length === 0) {
+            products = getSample48Products();
+            console.log(`✅ Using ${products.length} sample products`);
         }
 
         allProducts = products;
+
+        // Save to all storage locations for synchronization
         localStorage.setItem('admin-products', JSON.stringify(allProducts));
         localStorage.setItem('website-products', JSON.stringify(allProducts));
+        localStorage.setItem('products', JSON.stringify(allProducts));
         localStorage.setItem('frontend-products', JSON.stringify(allProducts));
+
         displayProducts();
+        console.log(`✅ Admin loaded ${allProducts.length} products total`);
+
     } catch (error) {
         console.error('Error loading products:', error);
-        allProducts = JSON.parse(localStorage.getItem('products') || '[]');
+        // Emergency fallback
+        allProducts = getSample48Products();
+        localStorage.setItem('admin-products', JSON.stringify(allProducts));
+        localStorage.setItem('website-products', JSON.stringify(allProducts));
+        localStorage.setItem('products', JSON.stringify(allProducts));
         displayProducts();
     }
 }
@@ -238,32 +283,119 @@ async function loadProducts() {
 async function saveProduct(productData) {
     try {
         if (isConnected && supabase) {
+            // First, get or create category
+            let categoryId = 1; // Default category ID
+            if (productData.category) {
+                const { data: categoryData, error: categoryError } = await supabase
+                    .from('categories')
+                    .select('id')
+                    .eq('name', productData.category)
+                    .single();
+
+                if (categoryError) {
+                    // Create new category if it doesn't exist
+                    const { data: newCategory, error: createError } = await supabase
+                        .from('categories')
+                        .insert([{
+                            name: productData.category,
+                            slug: productData.category.toLowerCase().replace(/\s+/g, '-'),
+                            description: `Category for ${productData.category}`,
+                            is_active: true
+                        }])
+                        .select()
+                        .single();
+
+                    if (!createError) {
+                        categoryId = newCategory.id;
+                    }
+                } else {
+                    categoryId = categoryData.id;
+                }
+            }
+
+            // Prepare product data for database
+            const dbProductData = {
+                name: productData.name,
+                description: productData.description || '',
+                price: parseFloat(productData.price) || 0,
+                category_id: categoryId,
+                image_url: productData.image_url || '',
+                badge: productData.badge || '',
+                feature: productData.is_featured || productData.featured || false,
+                stock_quantity: productData.stock_quantity || 0
+            };
+
             if (productData.id) {
                 // Update existing product
                 const { data, error } = await supabase
                     .from('products')
-                    .update(productData)
+                    .update(dbProductData)
                     .eq('id', productData.id)
-                    .select()
+                    .select(`
+                        *,
+                        categories (
+                            name,
+                            slug
+                        )
+                    `)
                     .single();
 
                 if (error) throw error;
 
+                // Transform back to expected format
+                const transformedProduct = {
+                    id: data.id,
+                    name: data.name,
+                    price: data.price,
+                    description: data.description,
+                    image_url: data.image_url,
+                    category: data.categories ? data.categories.name : 'General',
+                    badge: data.badge,
+                    featured: data.feature,
+                    is_featured: data.feature,
+                    stock_quantity: data.stock_quantity,
+                    is_active: true,
+                    created_at: data.created_at
+                };
+
                 // Update local array
                 const index = allProducts.findIndex(p => p.id === productData.id);
                 if (index !== -1) {
-                    allProducts[index] = data;
+                    allProducts[index] = transformedProduct;
                 }
             } else {
                 // Create new product
                 const { data, error } = await supabase
                     .from('products')
-                    .insert([{ ...productData, created_at: new Date().toISOString() }])
-                    .select()
+                    .insert([dbProductData])
+                    .select(`
+                        *,
+                        categories (
+                            name,
+                            slug
+                        )
+                    `)
                     .single();
 
                 if (error) throw error;
-                allProducts.unshift(data);
+
+                // Transform back to expected format
+                const transformedProduct = {
+                    id: data.id,
+                    name: data.name,
+                    price: data.price,
+                    description: data.description,
+                    image_url: data.image_url,
+                    category: data.categories ? data.categories.name : 'General',
+                    badge: data.badge,
+                    featured: data.feature,
+                    is_featured: data.feature,
+                    stock_quantity: data.stock_quantity,
+                    is_active: true,
+                    created_at: data.created_at
+                };
+
+                allProducts.unshift(transformedProduct);
             }
         } else {
             // Fallback to localStorage
@@ -885,7 +1017,7 @@ function manageOrderPayment(orderId, totalAmount, currentPaid, paymentStatus) {
                 </h2>
 
                 <div style="background: #f8f9fa; padding: 1rem; border-radius: 8px; margin-bottom: 1.5rem;">
-                    <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; text-align: center;">
+                    <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem: text-align: center;">
                         <div>
                             <small style="color: #666;">Total Amount</small><br>
                             <strong style="font-size: 1.2rem;">৳${totalAmount}</strong>
@@ -901,7 +1033,7 @@ function manageOrderPayment(orderId, totalAmount, currentPaid, paymentStatus) {
                     </div>
                 </div>
 
-                <                div style="margin-bottom: 1.5rem;">
+                                <div style="margin-bottom: 1.5rem;">
                     <h4 style="color: #333; margin-bottom: 1rem;">Payment Actions:</h4>
 
                     ${dueAmount > 0 ? `
@@ -1474,6 +1606,17 @@ function getSamplePromotions() {
     ];
 }
 
+// Update product counts display
+function updateProductCounts() {
+    const totalCount = document.getElementById('totalProductsCount');
+    const activeCount = document.getElementById('activeProductsCount');
+    const featuredCount = document.getElementById('featuredProductsCount');
+
+    if (totalCount) totalCount.textContent = allProducts.length;
+    if (activeCount) activeCount.textContent = allProducts.filter(p => p.is_active !== false).length;
+    if (featuredCount) featuredCount.textContent = allProducts.filter(p => p.is_featured).length;
+}
+
 // Load featured products selector
 function loadFeaturedProductsSelector() {
     const selector = document.getElementById('featuredProductsSelector');
@@ -1625,6 +1768,106 @@ function updateGlobalDesignSettings() {
     console.log('🎨 Global design settings updated and synced');
 }
 
+// Legacy function for compatibility
+function openAdminPanel() {
+    handleAdminAccess();
+}
+
+// Initialize admin panel
+document.addEventListener('DOMContentLoaded', function() {
+    console.log('🚀 Admin panel initializing...');
+
+    // Initialize Supabase connection
+    initializeSupabase().then(() => {
+        // Load all data
+        loadProductsAdmin();
+        loadOrdersData();
+        loadVouchersData();
+
+        console.log('✅ Admin panel initialized');
+    });
+
+    // Initialize form handlers
+    const productForm = document.getElementById('productForm');
+    if (productForm) {
+        productForm.addEventListener('submit', handleProductSubmit);
+    }
+});
+
+// Handle product form submission
+async function handleProductSubmit(event) {
+    event.preventDefault();
+
+    const formData = new FormData(event.target);
+    const productData = {
+        name: formData.get('productName'),
+        price: parseFloat(formData.get('productPrice')),
+        category: formData.get('productCategory'),
+        description: formData.get('productDescription') || '',
+        image_url: formData.get('productImage'),
+        is_active: true,
+        created_at: new Date().toISOString()
+    };
+
+    try {
+        if (window.editingProductId) {
+            // Update existing product
+            productData.id = window.editingProductId;
+
+            if (supabase) {
+                const { error } = await supabase
+                    .from('products')
+                    .update(productData)
+                    .eq('id', window.editingProductId);
+
+                if (error) throw error;
+            }
+
+            // Update in local array
+            const index = allProducts.findIndex(p => p.id === window.editingProductId);
+            if (index !== -1) {
+                allProducts[index] = { ...allProducts[index], ...productData };
+            }
+
+            showNotification('Product updated successfully!', 'success');
+            delete window.editingProductId;
+        } else {
+            // Add new product
+            productData.id = Date.now();
+
+            if (supabase) {
+                const { error } = await supabase
+                    .from('products')
+                    .insert([productData]);
+
+                if (error) throw error;
+            }
+
+            allProducts.push(productData);
+            showNotification('Product added successfully!', 'success');
+        }
+
+        // Update localStorage
+        localStorage.setItem('admin-products', JSON.stringify(allProducts));
+        localStorage.setItem('website-products', JSON.stringify(allProducts));
+
+        // Refresh display
+        displayProductsAdmin();
+        updateProductCounts();
+
+        // Reset form
+        event.target.reset();
+        const submitBtn = event.target.querySelector('button[type="submit"]');
+        if (submitBtn) {
+            submitBtn.innerHTML = '<i class="fas fa-plus"></i> Add Product';
+        }
+
+    } catch (error) {
+        console.error('Error saving product:', error);
+        showNotification('Failed to save product: ' + error.message, 'error');
+    }
+}
+
 //Export functions for global access
 window.showSection = showSection;
 window.handleAddProduct = handleAddProduct;
@@ -1658,7 +1901,7 @@ document.addEventListener('DOMContentLoaded', function() {
     const promotionForm = document.getElementById('addPromotionForm');
     if (promotionForm) {
         promotionForm.addEventListener('submit', handleAddPromotion);
-    }
+}
 
     const siteSettingsForm = document.getElementById('siteSettingsForm');
     if (siteSettingsForm) {
@@ -1680,8 +1923,7 @@ function loadSiteSettings() {
 
         // Load content settings
         if (document.getElementById('siteName')) document.getElementById('siteName').value = settings.siteName || 'TryneX Lifestyle';
-        if (document.getElementById('heroTitle')) document.getElementById('heroTitle').value = settings.heroTitle || 'Premium Custom Gifts';
-        if (document.getElementById('heroSubtitle')) document.getElementById('heroSubtitle').value = settings.heroSubtitle || 'Personalized products for every occasion';
+        if (document.getElementById('heroTitle')) document.getElementById('heroTitle').value = settings.heroTitle || 'Premium Custom Gifts';        if (document.getElementById('heroSubtitle')) document.getElementById('heroSubtitle').value = settings.heroSubtitle || 'Personalized products for every occasion';
         if (document.getElementById('contactPhone')) document.getElementById('contactPhone').value = settings.contactPhone || '+880 1747 292277';
         if (document.getElementById('contactEmail')) document.getElementById('contactEmail').value = settings.contactEmail || 'info@trynexlifestyle.com';
         if (document.getElementById('aboutText')) document.getElementById('aboutText').value = settings.aboutText || 'Creating memories with premium custom gifts.';
@@ -1701,7 +1943,86 @@ function loadSiteSettings() {
     }
 }
 
-// Export functions for global access
+// Load products for admin panel
+async function loadProductsAdmin() {
+    try {
+        if (supabase) {
+            const { data, error } = await supabase
+                .from('products')
+                .select('*')
+                .order('created_at', { ascending: false });
+
+            if (error) throw error;
+            allProducts = data || [];
+        } else {
+            allProducts = JSON.parse(localStorage.getItem('admin-products') || '[]');
+        }
+
+        localStorage.setItem('admin-products', JSON.stringify(allProducts));
+        localStorage.setItem('website-products', JSON.stringify(allProducts));
+        displayProductsAdmin();
+        updateProductCounts();
+
+    } catch (error) {
+        console.error('Error loading products:', error);
+        showNotification('Error loading products: ' + error.message, 'error');
+    }
+}
+
+// Display products in admin panel
+function displayProductsAdmin() {
+    const container = document.getElementById('productsList');
+    if (!container) return;
+
+    if (allProducts.length === 0) {
+        container.innerHTML = '<p class="no-data">No products found.</p>';
+        return;
+    }
+
+    container.innerHTML = allProducts.map(product => `
+        <div class="admin-card">
+            <div class="product-header">
+                <h3>${product.name}</h3>
+                <div class="product-actions">
+                    <button onclick="editProduct('${product.id}')" class="btn-edit">Edit</button>
+                    <button onclick="deleteProduct('${product.id}')" class="btn-delete">Delete</button>
+                </div>
+            </div>
+            <div class="product-details">
+                <img src="${product.image_url || 'https://via.placeholder.com/150'}" alt="${product.name}" class="product-thumb">
+                <div class="product-info">
+                    <p><strong>Price:</strong> ₹${product.price}</p>
+                    <p><strong>Category:</strong> ${product.category}</p>
+                    <p><strong>Description:</strong> ${product.description.substring(0, 100)}...</p>
+                    <p><strong>Created:</strong> ${new Date(product.created_at).toLocaleDateString()}</p>
+                </div>
+            </div>
+        </div>
+    `).join('');
+}
+
+//Edit product function
+function editProduct(productId) {
+    const product = allProducts.find(p => p.id === productId);
+    if (!product) return;
+
+    const form = document.getElementById('productForm');
+    if (!form) return;
+
+    form.productName.value = product.name || '';
+    form.productPrice.value = product.price || '';
+    form.productCategory.value = product.category || '';
+    form.productDescription.value = product.description || '';
+    form.productImage.value = product.image_url || '';
+
+    window.editingProductId = productId;
+    const submitBtn = form.querySelector('button[type="submit"]');
+    if (submitBtn) {
+        submitBtn.innerHTML = '<i class="fas fa-save"></i> Update Product';
+    }
+}
+
+//Export functions for global access
 window.showTab = showTab;
 window.editProduct = editProduct;
 window.deleteProduct = deleteProduct;
@@ -1712,6 +2033,12 @@ window.handleSiteSettings = handleSiteSettings;
 window.handleAddCategory = handleAddCategory;
 window.applyDesignChangesToAdminPanel = applyDesignChangesToAdminPanel;
 window.loadSiteSettings = loadSiteSettings;
+window.loadProductsAdmin = loadProductsAdmin;
+window.displayProductsAdmin = displayProductsAdmin;
+window.editProduct = editProduct;
+window.deleteProduct = deleteProduct;
+window.updateProductCounts = updateProductCounts;
+window.updateProductCounts = updateProductCounts;
 
 // Initialize admin panel without authentication
         async function initializeAdminPanel() {

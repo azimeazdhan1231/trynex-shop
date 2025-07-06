@@ -209,65 +209,92 @@ async function loadProducts() {
         isLoading = true;
         console.log('🔄 Loading products...');
 
-        let products = [];
+        let loadedProducts = [];
 
-        // Load products from Supabase database only
+        // Try Supabase first
         if (supabase) {
             try {
                 console.log('📡 Fetching products from database...');
                 const { data, error } = await supabase
                     .from('products')
-                    .select('*')
+                    .select(`
+                        *,
+                        categories (
+                            name,
+                            slug
+                        )
+                    `)
                     .order('created_at', { ascending: false });
 
                 if (error) throw error;
 
-                allProducts = data || [];
-                console.log(`✅ Loaded ${allProducts.length} products from Supabase`);
+                // Transform data to match expected format
+                loadedProducts = (data || []).map(product => ({
+                    id: product.id,
+                    name: product.name,
+                    price: product.price,
+                    description: product.description,
+                    image_url: product.image_url,
+                    category: product.categories ? product.categories.name : 'General',
+                    badge: product.badge,
+                    featured: product.feature,
+                    is_featured: product.feature,
+                    stock_quantity: product.stock_quantity,
+                    is_active: true,
+                    created_at: product.created_at,
+                    discount: 0 // Add default discount
+                }));
+
+                console.log(`✅ Loaded ${loadedProducts.length} products from Supabase`);
                 
-                if (allProducts.length === 0) {
-                    showMessage('No products found. Please add products via admin panel.', 'warning');
+                if (loadedProducts.length > 0) {
+                    // Save to localStorage for caching
+                    localStorage.setItem('website-products', JSON.stringify(loadedProducts));
+                    localStorage.setItem('admin-products', JSON.stringify(loadedProducts));
                 }
             } catch (supabaseError) {
-                console.error('❌ Failed to load products:', supabaseError);
-                showMessage('Failed to connect to database. Please check your connection.', 'error');
-                allProducts = [];
+                console.error('❌ Failed to load from Supabase:', supabaseError);
+                showToast('Database connection failed, trying cache...', 'warning');
             }
         }
 
-        // Try localStorage if Supabase failed
-        if (products.length === 0) {
+        // Try localStorage if Supabase failed or returned no data
+        if (loadedProducts.length === 0) {
             const cachedProducts = localStorage.getItem('website-products') || 
                                  localStorage.getItem('admin-products') || 
                                  localStorage.getItem('frontend-products');
 
             if (cachedProducts) {
                 try {
-                    products = JSON.parse(cachedProducts);
-                    console.log('✅ Loaded products from cache:', products.length);
+                    loadedProducts = JSON.parse(cachedProducts);
+                    console.log('✅ Loaded products from cache:', loadedProducts.length);
+                    showToast('Loaded products from cache', 'info');
                 } catch (parseError) {
-                    console.log('Cache parse failed, using samples');
+                    console.error('Cache parse failed:', parseError);
                 }
             }
         }
 
         // Use sample products as final fallback
-        if (products.length === 0) {
-            products = getSampleProducts();
-            console.log('✅ Using sample products:', products.length);
+        if (loadedProducts.length === 0) {
+            loadedProducts = getSampleProducts();
+            console.log('✅ Using sample products:', loadedProducts.length);
+            showToast('Using sample products for demonstration', 'info');
 
             // Save to localStorage for future use
-            localStorage.setItem('website-products', JSON.stringify(products));
-            localStorage.setItem('admin-products', JSON.stringify(products));
+            localStorage.setItem('website-products', JSON.stringify(loadedProducts));
+            localStorage.setItem('admin-products', JSON.stringify(loadedProducts));
         }
 
-        allProducts = products;
+        allProducts = loadedProducts;
         filteredProducts = [...allProducts];
 
         // Initialize display
         updateProductCounts();
         displayProducts();
         updateShowingInfo();
+
+        showToast(`Loaded ${allProducts.length} products successfully`, 'success');
 
     } catch (error) {
         console.error('❌ Error loading products:', error);
@@ -276,6 +303,7 @@ async function loadProducts() {
         filteredProducts = [...allProducts];
         localStorage.setItem('website-products', JSON.stringify(allProducts));
         displayProducts();
+        showToast('Using emergency product data', 'warning');
     } finally {
         isLoading = false;
     }
@@ -386,6 +414,17 @@ function displayProducts() {
     const startIndex = 0;
     const endIndex = currentPage * productsPerPage;
     const productsToShow = filteredProducts.slice(startIndex, endIndex);
+
+    if (allProducts.length === 0) {
+        productsGrid.innerHTML = `
+            <div class="no-products" style="grid-column: 1 / -1; text-align: center; padding: 4rem;">
+                <i class="fas fa-box-open" style="font-size: 3rem; color: #ccc; margin-bottom: 1rem;"></i>
+                <h3 style="color: #666; font-size: 1.2rem;">Loading Products...</h3>
+                <p style="color: #999; margin-bottom: 2rem;">Please wait while we load products</p>
+            </div>
+        `;
+        return;
+    }
 
     if (productsToShow.length === 0) {
         productsGrid.innerHTML = `
